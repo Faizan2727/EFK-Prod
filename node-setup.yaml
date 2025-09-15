@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: max-map-count-setter
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: max-map-count-setter
+  template:
+    metadata:
+      labels:
+        name: max-map-count-setter
+    spec:
+      containers:
+      - name: set-vm-max-map-count
+        image: busybox
+        command:
+        - "/bin/sh"
+        - "-c"
+        - |
+          sysctl -w vm.max_map_count=262144
+          while true; do sleep 86400; done
+        securityContext:
+          privileged: true
