@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-config-mysql
+data:
+  fluent.conf: |
+    <system>
+      log_level info
+    </system>
+
+    ##############################
+    # 1. MySQL Error Log
+    ##############################
+    <source>
+      @type tail
+      path /var/log/mysql/error.log
+      pos_file /var/log/fluentd-mysql-error.pos
+      tag mysql.error
+      <parse>
+        @type regexp
+        expression /^(?<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z)\s+(?<thread>\d+)?\s*\[(?<level>[^\]]+)\]\s*(?<code>\[[^\]]+\])?\s*(?<message>.*)$/
+        time_key timestamp
+        time_format %Y-%m-%dT%H:%M:%S.%NZ
+      </parse>
+    </source>
+
+    ##############################
+    # 2. MySQL General Query Log (multiline)
+    ##############################
+    <source>
+      @type tail
+      path /var/log/mysql/general.log
+      pos_file /var/log/fluentd-mysql-general.pos
+      tag mysql.general
+      <parse>
+        @type multiline
+        format_firstline /^(?<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z)\s+\d+\s+\S+\s+/
+        format1 /^(?<line>.*)$/
+        time_key timestamp
+        time_format %Y-%m-%dT%H:%M:%S.%NZ
+      </parse>
+    </source>
+
+    ##############################
+    # 3. MySQL Slow Query Log (multiline)
+    ##############################
+    <source>
+      @type tail
+      path /var/log/mysql/slow.log
+      pos_file /var/log/fluentd-mysql-slow.pos
+      tag mysql.slow
+      <parse>
+        @type multiline
+        format_firstline /^# Time: /
+        format1 /^# Time: (?<timestamp>\d{6}\s+\d{2}:\d{2}:\d{2})/
+        format2 /^# User@Host: (?<userhost>.*)/
+        format3 /^# Query_time: (?<query_time>\d+\.\d+)/
+        format4 /^(?<query>.*);$/
+        time_format %y%m%d %H:%M:%S
+      </parse>
+    </source>
+
+    ##############################
+    # 4. Add Kubernetes metadata
+    ##############################
+    <filter mysql.**>
+      @type record_transformer
+      <record>
+        hostname "#{Socket.gethostname}"
+        pod_name "#{ENV['HOSTNAME']}"
+        namespace "#{ENV['POD_NAMESPACE'] || 'default'}"
+        container_name mysql
+        log_type ${tag_parts[1]}  # error/general/slow
+        cluster_name k8s-cluster
+        parsed_timestamp ${time}
+      </record>
+    </filter>
+
+    ##############################
+    # 5. Output to stdout + Elasticsearch
+    ##############################
+    <match mysql.**>
+      @type copy
+      <store>
+        @type stdout
+      </store>
+      <store>
+        @type elasticsearch
+        host "#{ENV['FLUENT_ELASTICSEARCH_HOST']}"
+        port "#{ENV['FLUENT_ELASTICSEARCH_PORT']}"
+        scheme "#{ENV['FLUENT_ELASTICSEARCH_SCHEME']}"
+        ssl_verify "#{ENV['FLUENT_ELASTICSEARCH_SSL_VERIFY']}"
+        index_name "#{ENV['FLUENT_ELASTICSEARCH_INDEX_NAME']}"
+        type_name _doc
+        logstash_format true
+        logstash_prefix mysql-logs
+        logstash_dateformat %Y.%m.%d
+        include_tag_key true
+        tag_key @log_name
+        flush_interval 5s
+        <buffer>
+          @type file
+          path /var/log/fluentd-buffers/mysql.buffer
+          flush_mode interval
+          retry_type exponential_backoff
+          flush_interval 5s
+          retry_forever
+          retry_max_interval 30
+          chunk_limit_size 2M
+          queue_limit_length 8
+          overflow_action block
+        </buffer>
+      </store>
+    </match>
